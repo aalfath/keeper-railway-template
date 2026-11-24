@@ -6,6 +6,7 @@ set -euo pipefail
 log() { printf '[keeper-railway] %s\n' "$*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+export PATH="/command:${PATH}"   # s6-setuidgid lives here
 : "${PORT:=8080}"
 : "${DATABASE_URL:?DATABASE_URL is required (reference your Postgres service)}"
 : "${REDIS_URL:?REDIS_URL is required (reference your Redis service)}"
