@@ -5,10 +5,13 @@ FROM ghcr.io/ridafkih/keeper-standalone:2.34.3@sha256:7a31517cfef742c2366a123a4b
 # The upstream image starts its own Postgres, Redis and Caddy under s6-overlay.
 # On Railway we use Railway Postgres and Redis, so we run the five Keeper
 # processes under a small supervisor that exits non-zero when any of them dies.
+# guard.mjs blocks public sign-up and serves /healthz on the public port.
 COPY start.sh /usr/local/bin/keeper-railway-start
 COPY bootstrap-admin.sh /usr/local/bin/keeper-railway-bootstrap-admin
+COPY guard.mjs /etc/keeper-railway/guard.mjs
 RUN chmod 0755 /usr/local/bin/keeper-railway-start /usr/local/bin/keeper-railway-bootstrap-admin \
-  && mkdir -p /etc/keeper-railway /var/lib/keeper-railway/caddy
+  && chmod 0644 /etc/keeper-railway/guard.mjs \
+  && mkdir -p /var/lib/keeper-railway
 
 ENV PORT=8080
 EXPOSE 8080

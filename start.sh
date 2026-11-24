@@ -40,7 +40,7 @@ export ENCRYPTION_KEY
 
 # Internal wiring (fixed in this image).
 export ENV=production COMMERCIAL_MODE=false WORKER_JOB_QUEUE_ENABLED=true
-export API_PORT=3001 MCP_PORT=3002 WEB_PORT=3000
+export API_PORT=3001 MCP_PORT=3002
 export VITE_API_URL=http://127.0.0.1:3001 VITE_MCP_URL=http://127.0.0.1:3002 MCP_API_URL=http://127.0.0.1:3001
 
 # Sized for a small Railway service (0.5 GB on the Free plan). Override if you scale up.
@@ -49,13 +49,19 @@ export INGEST_FLEET_CONCURRENCY="${INGEST_FLEET_CONCURRENCY:-8}"
 export INGEST_WAKE_CONCURRENCY="${INGEST_WAKE_CONCURRENCY:-4}"
 export INGEST_CLAIM_BATCH="${INGEST_CLAIM_BATCH:-20}"
 export CRON_FLUSH_POOL_MAX="${CRON_FLUSH_POOL_MAX:-4}"
-export GOMAXPROCS="${GOMAXPROCS:-2}"   # Caddy
 BUN_FLAGS="${BUN_FLAGS---smol}"   # smaller heap; set BUN_FLAGS= to turn off
 
-# Memory check: the five Keeper processes need about 600-700 MB together.
+# Memory: the separate Keeper processes need about 650 MB together. Below about
+# 900 MB (Railway Free/Trial: 0.5 GB) run API, cron, worker and web in one Bun
+# process with a capped heap and the MCP server off, unless KEEPER_LOW_MEMORY says otherwise.
 mem_max="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)"
-if [ "$mem_max" != "max" ] && [ "$mem_max" -lt 900000000 ] 2>/dev/null; then
-  log "WARNING: this service has $((mem_max/1048576)) MB of RAM. Keeper needs about 1 GB (Railway Hobby plan or higher); with less it will be killed and restarted."
+low_mem="${KEEPER_LOW_MEMORY:-auto}"
+if [ "$low_mem" = "auto" ]; then
+  low_mem=false
+  if [ "$mem_max" != "max" ] && [ "$mem_max" -lt 900000000 ] 2>/dev/null; then low_mem=true; fi
+fi
+if [ "$low_mem" = "true" ]; then
+  log "Low-memory mode (${mem_max} bytes): one Bun process, MCP server off. Give the service 1 GB (Hobby plan) for the MCP server."
 fi
 
 # Database migrations (upstream script, guarded by a Postgres advisory lock).
@@ -65,41 +71,6 @@ for i in $(seq 1 60); do
   ok=0; log "Migration attempt $i failed; retrying in 3 s"; sleep 3
 done
 [ "${ok:-0}" = 1 ] || die "database migrations failed"
-
-# Caddy in front: Railway's proxy -> Caddy on $PORT -> web (3000) / API (3001).
-signup_block='@signup path_regexp signup (?i)^/+api/+auth/.*sign-?up
-		respond @signup "Sign-up is disabled on this instance" 403'
-if [ "${KEEPER_ALLOW_SIGNUP:-false}" = "true" ]; then signup_block='# sign-up allowed (KEEPER_ALLOW_SIGNUP=true)'; fi
-export XDG_DATA_HOME=/var/lib/keeper-railway XDG_CONFIG_HOME=/var/lib/keeper-railway
-cat > /etc/keeper-railway/Caddyfile <<CADDY
-{
-	admin off
-	auto_https off
-	persist_config off
-	servers {
-		trusted_proxies static 100.64.0.0/10 152.233.0.0/16 fd00::/8
-	}
-}
-:${PORT} {
-	route {
-		${signup_block}
-		handle /healthz {
-			rewrite * /api/health
-			reverse_proxy 127.0.0.1:3001
-		}
-		handle /api/* {
-			reverse_proxy 127.0.0.1:3001 {
-				flush_interval -1
-			}
-		}
-		handle {
-			reverse_proxy 127.0.0.1:3000 {
-				flush_interval -1
-			}
-		}
-	}
-}
-CADDY
 
 pids=()
 names=()
@@ -118,14 +89,30 @@ curl -sf http://127.0.0.1:3001/api/health >/dev/null || die "API did not become 
 # Create the admin account on first boot (sign-up is closed to the public).
 /usr/local/bin/keeper-railway-bootstrap-admin || die "admin bootstrap failed; refusing to start with open sign-up"
 
-start cron   "${CRON_POOL_MAX:-4}"   s6-setuidgid keeper bun ${BUN_FLAGS} run services/cron/dist/index.js
-start worker "${WORKER_POOL_MAX:-4}" s6-setuidgid keeper bun ${BUN_FLAGS} run services/worker/dist/index.js
-if [ "${KEEPER_MCP_ENABLED:-true}" = "true" ]; then
-  start mcp  "${MCP_POOL_MAX:-2}"    s6-setuidgid keeper bun ${BUN_FLAGS} run services/mcp/dist/index.js
+W=/app/applications/web/dist/server-entry/index.js
+if [ "$low_mem" = "true" ]; then
+  # The API already runs on its own for the admin bootstrap; stop it and run
+  # API, cron, worker and web in one Bun process with a capped heap.
+  kill -TERM "${pids[0]}" 2>/dev/null || true; wait "${pids[0]}" 2>/dev/null || true
+  pids=(); names=()
+  unset MCP_PUBLIC_URL VITE_MCP_URL
+  ( cd /app/applications/web && export DATABASE_POOL_MAX="${COMBINED_POOL_MAX:-8}" \
+      BUN_JSC_forceRAMSize="${BUN_JSC_forceRAMSize:-268435456}" \
+      KEEPER_MODULES="/app/services/api/dist/index.js,/app/services/cron/dist/index.js,/app/services/worker/dist/index.js,$W" \
+      && exec s6-setuidgid keeper bun ${BUN_FLAGS} /etc/keeper-railway/guard.mjs ) &
+  pids+=($!); names+=(keeper); log "started keeper (api, cron, worker, web in one process; pid $!)"
+else
+  start cron   "${CRON_POOL_MAX:-4}"   s6-setuidgid keeper bun ${BUN_FLAGS} run services/cron/dist/index.js
+  start worker "${WORKER_POOL_MAX:-4}" s6-setuidgid keeper bun ${BUN_FLAGS} run services/worker/dist/index.js
+  if [ "${KEEPER_MCP_ENABLED:-true}" = "true" ]; then
+    start mcp  "${MCP_POOL_MAX:-2}"    s6-setuidgid keeper bun ${BUN_FLAGS} run services/mcp/dist/index.js
+  else
+    unset MCP_PUBLIC_URL VITE_MCP_URL
+  fi
+  ( cd /app/applications/web && export KEEPER_MODULES="$W" \
+      && exec s6-setuidgid keeper bun ${BUN_FLAGS} /etc/keeper-railway/guard.mjs ) &
+  pids+=($!); names+=(web); log "started web (pid $!)"
 fi
-( cd /app/applications/web && export HOSTNAME=127.0.0.1 PORT=3000 && exec s6-setuidgid keeper bun ${BUN_FLAGS} dist/server-entry/index.js ) &
-pids+=($!); names+=(web); log "started web (pid $!)"
-start caddy  0 caddy run --config /etc/keeper-railway/Caddyfile --adapter caddyfile
 
 shutdown() { log "stopping"; kill -TERM "${pids[@]}" 2>/dev/null || true; wait || true; exit 0; }
 trap shutdown TERM INT
