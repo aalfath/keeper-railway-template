@@ -7,7 +7,8 @@ FROM ghcr.io/ridafkih/keeper-standalone:2.34.3@sha256:7a31517cfef742c2366a123a4b
 # processes under a small supervisor that exits non-zero when any of them dies.
 COPY start.sh /usr/local/bin/keeper-railway-start
 COPY bootstrap-admin.sh /usr/local/bin/keeper-railway-bootstrap-admin
-RUN chmod 0755 /usr/local/bin/keeper-railway-start /usr/local/bin/keeper-railway-bootstrap-admin
+RUN chmod 0755 /usr/local/bin/keeper-railway-start /usr/local/bin/keeper-railway-bootstrap-admin \
+  && mkdir -p /etc/keeper-railway /var/lib/keeper-railway/caddy
 
 ENV PORT=8080
 EXPOSE 8080

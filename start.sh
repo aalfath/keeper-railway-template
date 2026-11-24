@@ -64,8 +64,8 @@ done
 signup_block='@signup path_regexp signup (?i)^/+api/+auth/.*sign-?up
 	respond @signup "Sign-up is disabled on this instance" 403'
 if [ "${KEEPER_ALLOW_SIGNUP:-false}" = "true" ]; then signup_block='# sign-up allowed (KEEPER_ALLOW_SIGNUP=true)'; fi
-mkdir -p /tmp/caddy
-cat > /tmp/caddy/Caddyfile <<CADDY
+export XDG_DATA_HOME=/var/lib/keeper-railway XDG_CONFIG_HOME=/var/lib/keeper-railway
+cat > /etc/keeper-railway/Caddyfile <<CADDY
 {
 	admin off
 	auto_https off
@@ -118,7 +118,7 @@ if [ "${KEEPER_MCP_ENABLED:-true}" = "true" ]; then
 fi
 ( cd /app/applications/web && export HOSTNAME=127.0.0.1 PORT=3000 && exec s6-setuidgid keeper bun ${BUN_FLAGS} dist/server-entry/index.js ) &
 pids+=($!); names+=(web); log "started web (pid $!)"
-start caddy  0 caddy run --config /tmp/caddy/Caddyfile --adapter caddyfile
+start caddy  0 caddy run --config /etc/keeper-railway/Caddyfile --adapter caddyfile
 
 shutdown() { log "stopping"; kill -TERM "${pids[@]}" 2>/dev/null || true; wait || true; exit 0; }
 trap shutdown TERM INT
