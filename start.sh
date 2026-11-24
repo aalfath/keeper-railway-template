@@ -52,6 +52,12 @@ export CRON_FLUSH_POOL_MAX="${CRON_FLUSH_POOL_MAX:-4}"
 export GOMAXPROCS="${GOMAXPROCS:-2}"   # Caddy
 BUN_FLAGS="${BUN_FLAGS---smol}"   # smaller heap; set BUN_FLAGS= to turn off
 
+# Memory check: the five Keeper processes need about 600-700 MB together.
+mem_max="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)"
+if [ "$mem_max" != "max" ] && [ "$mem_max" -lt 900000000 ] 2>/dev/null; then
+  log "WARNING: this service has $((mem_max/1048576)) MB of RAM. Keeper needs about 1 GB (Railway Hobby plan or higher); with less it will be killed and restarted."
+fi
+
 # Database migrations (upstream script, guarded by a Postgres advisory lock).
 log "Waiting for Postgres and running migrations"
 for i in $(seq 1 60); do
@@ -62,7 +68,7 @@ done
 
 # Caddy in front: Railway's proxy -> Caddy on $PORT -> web (3000) / API (3001).
 signup_block='@signup path_regexp signup (?i)^/+api/+auth/.*sign-?up
-	respond @signup "Sign-up is disabled on this instance" 403'
+		respond @signup "Sign-up is disabled on this instance" 403'
 if [ "${KEEPER_ALLOW_SIGNUP:-false}" = "true" ]; then signup_block='# sign-up allowed (KEEPER_ALLOW_SIGNUP=true)'; fi
 export XDG_DATA_HOME=/var/lib/keeper-railway XDG_CONFIG_HOME=/var/lib/keeper-railway
 cat > /etc/keeper-railway/Caddyfile <<CADDY
@@ -75,20 +81,21 @@ cat > /etc/keeper-railway/Caddyfile <<CADDY
 	}
 }
 :${PORT} {
-	${signup_block}
-	handle /healthz {
-		reverse_proxy 127.0.0.1:3001 {
-			rewrite /api/health
+	route {
+		${signup_block}
+		handle /healthz {
+			rewrite * /api/health
+			reverse_proxy 127.0.0.1:3001
 		}
-	}
-	handle /api/* {
-		reverse_proxy 127.0.0.1:3001 {
-			flush_interval -1
+		handle /api/* {
+			reverse_proxy 127.0.0.1:3001 {
+				flush_interval -1
+			}
 		}
-	}
-	handle {
-		reverse_proxy 127.0.0.1:3000 {
-			flush_interval -1
+		handle {
+			reverse_proxy 127.0.0.1:3000 {
+				flush_interval -1
+			}
 		}
 	}
 }
