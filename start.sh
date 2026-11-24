@@ -93,7 +93,9 @@ W=/app/applications/web/dist/server-entry/index.js
 if [ "$low_mem" = "true" ]; then
   # The API already runs on its own for the admin bootstrap; stop it and run
   # API, cron, worker and web in one Bun process with a capped heap.
-  kill -TERM "${pids[0]}" 2>/dev/null || true; wait "${pids[0]}" 2>/dev/null || true
+  kill -TERM "${pids[0]}" 2>/dev/null || true
+  for i in $(seq 1 20); do kill -0 "${pids[0]}" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL "${pids[0]}" 2>/dev/null || true; wait "${pids[0]}" 2>/dev/null || true
   pids=(); names=()
   unset MCP_PUBLIC_URL VITE_MCP_URL
   ( cd /app/applications/web && export DATABASE_POOL_MAX="${COMBINED_POOL_MAX:-8}" \
